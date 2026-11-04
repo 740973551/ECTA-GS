@@ -149,7 +149,7 @@ def test_sqlite_foreign_keys_and_backup(library):
     library.save_building(name="持久化测试")
     with library.engine.connect() as conn:
         assert conn.execute(text("PRAGMA foreign_keys")).scalar() == 1
-        assert conn.execute(text("select version_num from alembic_version")).scalar() == "0001"
+        assert conn.execute(text("select version_num from alembic_version")).scalar() == "0002"
     backup = library.backup_database()
     with sqlite3.connect(backup) as con:
         assert con.execute("select name from buildings").fetchone()[0] == "持久化测试"
