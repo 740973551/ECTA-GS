@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QSplitter, QAbstractItemView,
 )
 from ecta_gs.service import expand_paths
+from ecta_gs.parsers import STATUS_LABELS
+from ecta_gs.review_desktop import ReviewWorkspace
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +81,7 @@ class MainWindow(QMainWindow):
         self.busy = False
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
-        self.setWindowTitle("ECTA-GS · 建筑知识资料工作台 | Alpha 0.1 · M0/M1")
+        self.setWindowTitle("ECTA-GS · 建筑知识资料工作台 | Alpha 0.1.1 · 本地解析与人工审核")
         self.resize(1280, 820)
         self.setAcceptDrops(True)
         central = QWidget()
@@ -95,11 +97,13 @@ class MainWindow(QMainWindow):
         self.build_overview()
         self.build_buildings()
         self.build_documents()
-        for title in ("解析与人工审核", "构件知识库", "AI 研究助手"):
+        self.review_workspace = ReviewWorkspace(self)
+        self.pages.addWidget(self.review_workspace)
+        for title in ("构件知识库", "AI 研究助手"):
             page = QWidget()
             box = QVBoxLayout(page)
             box.addWidget(QLabel(f"<h2>{title}</h2>"))
-            message = "本轮已完成资料入库基础功能。本模块将在 M2–M4 增量实现。\nAI 服务：未配置。当前没有外部资料上传。\n已保存文件的状态为“已保存，尚未解析”，不会生成未经核实的知识。"
+            message = "本模块将在后续增量实现。已可在“解析与审核”页本地解析文件、人工整理并审核知识。\nAI 服务：未配置。当前没有外部资料上传。"
             label = QLabel(message)
             label.setWordWrap(True)
             box.addWidget(label)
@@ -116,9 +120,10 @@ class MainWindow(QMainWindow):
         box = QVBoxLayout(page)
         box.addWidget(QLabel("<h1>ECTA-GS</h1><h3>先认识每栋建筑，再比较建筑</h3>"))
         self.stats = QLabel()
-        self.stats.setStyleSheet("font-size:20px;padding:20px;background:white;")
+        self.stats.setStyleSheet("font-size:17px;padding:16px;background:white;")
+        self.stats.setWordWrap(True)
         box.addWidget(self.stats)
-        box.addWidget(QLabel("本轮：M0 / M1 · 离线资料保存\n解析队列、审核知识计数将在对应模块启用后提供。"))
+        box.addWidget(QLabel("本轮：本地资料解析与人工审核 · 无外部资料上传\n解析结果与审核知识分开保存，历史版本持续保留。"))
         box.addWidget(QLabel("<h3>最近导入资料</h3>"))
         self.recent = QTextEdit()
         self.recent.setReadOnly(True)
@@ -232,7 +237,7 @@ class MainWindow(QMainWindow):
         self.names = {b.id: b.name for b in self.all_buildings}
         self.refresh_buildings()
         for combo, all_option in ((self.import_building, False), (self.assignment, False), (self.doc_filter, True)):
-            previous = combo.currentData()
+            previous = combo.currentData() if combo.count() or not all_option else "all"
             combo.blockSignals(True)
             combo.clear()
             if all_option:
@@ -244,9 +249,13 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(max(0, index))
             combo.blockSignals(False)
         self.refresh_documents()
-        self.stats.setText("    |    ".join(f"{k}  {v}" for k, v in self.library.counts().items()))
+        self.refresh_stats()
+        self.review_workspace.refresh()
         self.recent.setPlainText("\n".join(f"{d.imported_at}  {d.filename}  ·  {self.names.get(d.building_id, '未分配')}" for d, _ in self.library.documents()[:12]) or "尚无资料。可以开始导入。")
         self.recent_buildings.setText("最近更新建筑：" + ("、".join(b.name for b in self.all_buildings[:5]) or "暂无"))
+
+    def refresh_stats(self):
+        self.stats.setText("    |    ".join(f"{k}  {v}" for k, v in self.library.counts().items()))
 
     def refresh_buildings(self):
         self.building_rows = self.library.buildings(self.search.text())
@@ -309,7 +318,7 @@ class MainWindow(QMainWindow):
         for doc, asset in self.doc_rows:
             row = self.doc_table.rowCount()
             self.doc_table.insertRow(row)
-            for col, value in enumerate((doc.filename, self.names.get(doc.building_id, "未分配"), f"{asset.size:,} B", "已保存，尚未解析", doc.imported_at)):
+            for col, value in enumerate((doc.filename, self.names.get(doc.building_id, "未分配"), f"{asset.size:,} B", STATUS_LABELS.get(doc.status, doc.status), doc.imported_at)):
                 self.doc_table.setItem(row, col, QTableWidgetItem(str(value)))
         self.show_document()
 
@@ -327,7 +336,7 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         doc, asset = selected
-        self.metadata.setPlainText(f"文件：{doc.filename}\n扩展名：{doc.extension}\nSHA-256：{asset.sha256}\n入库时间（UTC）：{doc.imported_at}\n状态：已保存，尚未解析\n错误：{doc.error or '无'}\n原件位置：{asset.relative_path}")
+        self.metadata.setPlainText(f"文件：{doc.filename}\n扩展名：{doc.extension}\nSHA-256：{asset.sha256}\n入库时间（UTC）：{doc.imported_at}\n状态：{STATUS_LABELS.get(doc.status, doc.status)}\n解析提示：{doc.error or '无'}\n原件位置：{asset.relative_path}")
         self.assignment.setCurrentIndex(self.assignment.findData(doc.building_id))
         self.source_edit.setText(doc.source_note)
         self.notes_edit.setText(doc.notes)
@@ -353,7 +362,7 @@ class MainWindow(QMainWindow):
                 self.image.setPixmap(QPixmap.fromImage(image))
                 self.preview.setPlainText("图片人工预览；OCR 尚未启用。")
             else:
-                self.preview.setPlainText("原件已保存。此格式的解析和内嵌预览将在 M2 提供。")
+                self.preview.setPlainText("原件已保存。请到“解析与审核”页运行本地解析并查看证据。")
         except Exception as exc:
             self.preview.setPlainText(f"预览失败：{exc}")
 
@@ -378,7 +387,7 @@ class MainWindow(QMainWindow):
 
     def start_import(self, paths):
         if self.busy:
-            return self.error("当前批次仍在保存，请待完成后再导入")
+            return self.error("当前有导入或解析任务，请等待完成后再导入")
         self.busy = True
         self.nav.setCurrentRow(2)
         for widget in self.import_buttons:
@@ -416,7 +425,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self.busy:
-            self.error("文件正在安全保存，请等待本批导入完成后关闭。")
+            self.error("文件正在导入或解析，请等待当前批次完成后关闭。")
             event.ignore()
         else:
             self.pool.waitForDone()
