@@ -13,12 +13,13 @@ from alembic.script import ScriptDirectory
 from platformdirs import user_data_path
 from sqlalchemy import create_engine, event, select, or_, func
 from sqlalchemy.orm import sessionmaker
-from ecta_gs.models import Building, BuildingPhase, Asset, Document
+from ecta_gs.models import Building, BuildingPhase, Asset, Document, KnowledgeClaim, Extraction, ParseTask
+from ecta_gs.review_service import ReviewService
 
 log = logging.getLogger(__name__)
 
 
-class Library:
+class Library(ReviewService):
     def __init__(self, root=None):
         self.root = Path(root or os.environ.get("ECTA_GS_DATA_DIR") or user_data_path("ECTA-GS", appauthor=False)).resolve()
         for folder in ("database", "library/objects", "library/.incoming", "extracted", "knowledge", "backups", "exports", "logs"):
@@ -45,6 +46,7 @@ class Library:
         with self.engine.begin() as conn:
             cfg.attributes["connection"] = conn
             command.upgrade(cfg, "head")
+        self.recover_parse_tasks()
 
     def backup_database(self):
         target = self.root / "backups" / (uuid4().hex + ".sqlite3")
@@ -150,6 +152,8 @@ class Library:
             doc = s.get(Document, doc_id)
             if doc is None:
                 raise ValueError("资料不存在")
+            if doc.building_id != building_id and s.scalar(select(KnowledgeClaim.id).join(Extraction, KnowledgeClaim.extraction_id == Extraction.id).where(Extraction.document_id == doc_id).limit(1)):
+                raise ValueError("此资料已有审核条目，不能直接改变归属；请将原文件另行导入目标建筑，保留现有知识的来源归属")
             duplicate = s.scalar(select(Document).where(Document.asset_id == doc.asset_id, Document.scope == (building_id or 0), Document.id != doc_id))
             if duplicate:
                 raise ValueError("目标建筑已有相同原件；原归属和备注已保留")
@@ -161,7 +165,11 @@ class Library:
             return {"建筑档案": s.scalar(select(func.count()).select_from(Building)),
                     "原始文件": s.scalar(select(func.count()).select_from(Asset)),
                     "资料关联": s.scalar(select(func.count()).select_from(Document)),
-                    "尚未解析": s.scalar(select(func.count()).select_from(Document).where(Document.status == "saved_unparsed"))}
+                    "尚未解析": s.scalar(select(func.count()).select_from(Document).where(Document.status == "saved_unparsed")),
+                    "待解析任务": s.scalar(select(func.count()).select_from(ParseTask).where(ParseTask.status.in_(["queued", "running"]))),
+                    "解析失败": s.scalar(select(func.count()).select_from(Document).where(Document.status == "failed")),
+                    "待审核": s.scalar(select(func.count()).select_from(KnowledgeClaim).where(KnowledgeClaim.status == "pending_review")),
+                    "已确认知识": s.scalar(select(func.count()).select_from(KnowledgeClaim).where(KnowledgeClaim.status == "approved"))}
 
     def close(self):
         self.engine.dispose()
